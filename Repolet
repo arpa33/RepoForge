@@ -1,0 +1,568 @@
+repolet/
+├── src/
+│   ├── cli.ts
+│   ├── config.ts
+│   ├── github.ts
+│   ├── repository.ts
+│   ├── templates.ts
+│   └── types.ts
+├── templates/
+│   └── README.md
+├── .env.example
+├── .gitignore
+├── LICENSE
+├── package.json
+├── tsconfig.json
+└── README.md
+// ============================================================
+// package.json
+// ============================================================
+
+{
+  "name": "repolet",
+  "version": "1.0.0",
+  "description": "A professional CLI for creating and initializing GitHub repositories.",
+  "type": "module",
+  "bin": {
+    "repolet": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@octokit/rest": "^21.1.0",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "dotenv": "^16.4.7",
+    "ora": "^8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
+
+
+// ============================================================
+// tsconfig.json
+// ============================================================
+
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts"]
+}
+
+
+// ============================================================
+// .env.example
+// ============================================================
+
+GITHUB_TOKEN=your_github_personal_access_token
+
+
+// ============================================================
+// .gitignore
+// ============================================================
+
+node_modules/
+dist/
+.env
+.DS_Store
+*.log
+
+
+// ============================================================
+// src/types.ts
+// ============================================================
+
+export type RepositoryVisibility = "public" | "private";
+
+export interface RepositoryOptions {
+  name: string;
+  description?: string;
+  visibility: RepositoryVisibility;
+  private: boolean;
+  initialize: boolean;
+  gitignore?: string;
+  license?: string;
+  directory?: string;
+}
+
+export interface GitHubRepository {
+  id: number;
+  name: string;
+  full_name: string;
+  html_url: string;
+  clone_url: string;
+  ssh_url: string;
+  private: boolean;
+}
+
+
+// ============================================================
+// src/config.ts
+// ============================================================
+
+import "dotenv/config";
+
+export function getGitHubToken(): string {
+  const token = process.env.GITHUB_TOKEN;
+
+  if (!token) {
+    throw new Error(
+      "GITHUB_TOKEN is missing. Create a .env file or export GITHUB_TOKEN."
+    );
+  }
+
+  return token;
+}
+
+
+// ============================================================
+// src/github.ts
+// ============================================================
+
+import { Octokit } from "@octokit/rest";
+import { getGitHubToken } from "./config.js";
+import type { RepositoryOptions, GitHubRepository } from "./types.js";
+
+export class GitHubClient {
+  private readonly octokit: Octokit;
+
+  constructor() {
+    this.octokit = new Octokit({
+      auth: getGitHubToken()
+    });
+  }
+
+  async getAuthenticatedUser(): Promise<string> {
+    const { data } = await this.octokit.users.getAuthenticated();
+    return data.login;
+  }
+
+  async createRepository(
+    options: RepositoryOptions
+  ): Promise<GitHubRepository> {
+    const owner = await this.getAuthenticatedUser();
+
+    const { data } = await this.octokit.repos.createForAuthenticatedUser({
+      name: options.name,
+      description: options.description,
+      private: options.private,
+      auto_init: options.initialize,
+      gitignore_template: options.gitignore,
+      license_template: options.license
+    });
+
+    return {
+      id: data.id,
+      name: data.name,
+      full_name: data.full_name,
+      html_url: data.html_url,
+      clone_url: data.clone_url,
+      ssh_url: data.ssh_url,
+      private: data.private
+    };
+  }
+
+  async repositoryExists(
+    owner: string,
+    repository: string
+  ): Promise<boolean> {
+    try {
+      await this.octokit.repos.get({
+        owner,
+        repo: repository
+      });
+
+      return true;
+    } catch (error: any) {
+      if (error.status === 404) {
+        return false;
+      }
+
+      throw error;
+    }
+  }
+}
+
+
+// ============================================================
+// src/repository.ts
+// ============================================================
+
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdir, writeFile, access } from "node:fs/promises";
+import path from "node:path";
+
+const exec = promisify(execFile);
+
+export async function commandExists(command: string): Promise<boolean> {
+  try {
+    await exec(
+      process.platform === "win32" ? "where" : "which",
+      [command]
+    );
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function initializeLocalRepository(
+  directory: string,
+  repositoryUrl: string,
+  readmeContent: string
+): Promise<void> {
+  const absolutePath = path.resolve(directory);
+
+  await mkdir(absolutePath, { recursive: true });
+
+  const gitAvailable = await commandExists("git");
+
+  if (!gitAvailable) {
+    throw new Error(
+      "Git is not installed or is not available in PATH."
+    );
+  }
+
+  try {
+    await access(path.join(absolutePath, ".git"));
+  } catch {
+    await exec("git", ["init"], {
+      cwd: absolutePath
+    });
+  }
+
+  await writeFile(
+    path.join(absolutePath, "README.md"),
+    readmeContent,
+    "utf8"
+  );
+
+  await exec("git", ["add", "."], {
+    cwd: absolutePath
+  });
+
+  await exec(
+    "git",
+    [
+      "-c",
+      "user.name=Repolet",
+      "-c",
+      "user.email=repolet@localhost",
+      "commit",
+      "-m",
+      "chore: initialize repository"
+    ],
+    {
+      cwd: absolutePath
+    }
+  );
+
+  await exec(
+    "git",
+    ["branch", "-M", "main"],
+    {
+      cwd: absolutePath
+    }
+  );
+
+  await exec(
+    "git",
+    ["remote", "add", "origin", repositoryUrl],
+    {
+      cwd: absolutePath
+    }
+  );
+
+  await exec(
+    "git",
+    ["push", "-u", "origin", "main"],
+    {
+      cwd: absolutePath
+    }
+  );
+}
+
+
+// ============================================================
+// src/templates.ts
+// ============================================================
+
+export function createReadme(
+  name: string,
+  description?: string
+): string {
+  return `# ${name}
+
+${description ?? "A modern software project."}
+
+## Overview
+
+${description ?? "This project was initialized with Repolet."}
+
+## Features
+
+- Clean project structure
+- GitHub repository integration
+- Automated Git initialization
+- Reproducible setup
+- Developer-friendly workflow
+
+## Installation
+
+\`\`\`bash
+git clone <repository-url>
+cd ${name}
+npm install
+\`\`\`
+
+## Development
+
+\`\`\`bash
+npm run dev
+\`\`\`
+
+## Build
+
+\`\`\`bash
+npm run build
+\`\`\`
+
+## License
+
+This project is licensed under the MIT License.
+`;
+}
+
+
+// ============================================================
+// src/cli.ts
+// ============================================================
+
+#!/usr/bin/env node
+
+import { Command } from "commander";
+import chalk from "chalk";
+import ora from "ora";
+
+import { GitHubClient } from "./github.js";
+import { createReadme } from "./templates.js";
+import {
+  initializeLocalRepository
+} from "./repository.js";
+
+import type {
+  RepositoryOptions,
+  RepositoryVisibility
+} from "./types.js";
+
+const program = new Command();
+
+program
+  .name("repolet")
+  .description(
+    "Professional GitHub repository creation and initialization CLI."
+  )
+  .version("1.0.0");
+
+program
+  .command("create")
+  .description("Create and initialize a GitHub repository")
+  .argument("<name>", "Repository name")
+  .option(
+    "-d, --description <description>",
+    "Repository description"
+  )
+  .option(
+    "--private",
+    "Create a private repository",
+    false
+  )
+  .option(
+    "--public",
+    "Create a public repository",
+    false
+  )
+  .option(
+    "--no-init",
+    "Do not initialize the local repository"
+  )
+  .option(
+    "--directory <directory>",
+    "Local project directory"
+  )
+  .action(async (name: string, options) => {
+    const spinner = ora("Creating GitHub repository...").start();
+
+    try {
+      const visibility: RepositoryVisibility =
+        options.private ? "private" : "public";
+
+      const repositoryOptions: RepositoryOptions = {
+        name,
+        description: options.description,
+        visibility,
+        private: visibility === "private",
+        initialize: true,
+        directory: options.directory ?? name
+      };
+
+      const github = new GitHubClient();
+
+      const repository = await github.createRepository(
+        repositoryOptions
+      );
+
+      spinner.succeed("GitHub repository created.");
+
+      console.log();
+      console.log(
+        chalk.green("Repository:"),
+        repository.full_name
+      );
+
+      console.log(
+        chalk.blue("URL:"),
+        repository.html_url
+      );
+
+      console.log(
+        chalk.gray("Clone:"),
+        repository.clone_url
+      );
+
+      if (options.init !== false) {
+        const localSpinner = ora(
+          "Initializing local repository..."
+        ).start();
+
+        try {
+          const readme = createReadme(
+            name,
+            options.description
+          );
+
+          await initializeLocalRepository(
+            repositoryOptions.directory!,
+            repository.clone_url,
+            readme
+          );
+
+          localSpinner.succeed(
+            "Local repository initialized and pushed."
+          );
+
+          console.log();
+          console.log(
+            chalk.green("✓ Project ready:")
+          );
+
+          console.log(
+            chalk.gray(
+              `  ${repositoryOptions.directory}`
+            )
+          );
+        } catch (error) {
+          localSpinner.fail(
+            "Git initialization failed."
+          );
+
+          throw error;
+        }
+      }
+    } catch (error: any) {
+      spinner.fail("Repository creation failed.");
+
+      console.error();
+      console.error(
+        chalk.red(
+          error?.message ?? "Unknown error"
+        )
+      );
+
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("whoami")
+  .description("Display the authenticated GitHub account")
+  .action(async () => {
+    try {
+      const github = new GitHubClient();
+      const username =
+        await github.getAuthenticatedUser();
+
+      console.log(
+        `${chalk.green("GitHub user:")} ${username}`
+      );
+    } catch (error: any) {
+      console.error(
+        chalk.red(
+          error?.message ?? "Authentication failed."
+        )
+      );
+
+      process.exitCode = 1;
+    }
+  });
+
+program.parseAsync(process.argv);
+
+
+// ============================================================
+// README.md
+// ============================================================
+
+# Repolet
+
+A professional CLI for creating and initializing GitHub repositories.
+
+Repolet removes repetitive repository setup steps and provides a clean,
+automated workflow for developers.
+
+## Features
+
+- Create GitHub repositories from the terminal
+- Public or private repositories
+- Automatic README generation
+- Automatic Git initialization
+- Automatic remote configuration
+- Automatic initial commit
+- Automatic push to `main`
+- GitHub API integration
+- TypeScript implementation
+- Minimal and extensible architecture
+
+## Requirements
+
+- Node.js 20+
+- Git
+- GitHub account
+- GitHub Personal Access Token
+
+## Setup
+
+Clone the project:
+
+```bash
+git clone https://github.com/YOUR_USERNAME/repolet.git
+cd repolet
